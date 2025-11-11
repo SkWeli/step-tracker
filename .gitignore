@@ -1,0 +1,28 @@
+# Flutter & Dart
+.dart_tool/
+.packages
+.pub-cache/
+build/
+**/GeneratedPluginRegistrant.*
+.pub/
+flutter_*.png
+
+# Android
+**/local.properties
+**/android/app/debug
+**/android/app/profile
+**/android/app/release
+**/android/.gradle/
+**/android/app/*.keystore
+**/android/app/*.jks
+
+# iOS (not used here, but harmless)
+**/ios/Flutter/.last_build_id
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/build/
+
+# VSCode & OS
+.vscode/
+.idea/
+.DS_Store
