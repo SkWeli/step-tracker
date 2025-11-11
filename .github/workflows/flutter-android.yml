@@ -9,7 +9,7 @@ jobs:
 
     defaults:
       run:
-        working-directory: step_tracker_app  # 👈 points to your Flutter project folder
+        working-directory: step_tracker_app   # <-- your flutter folder
 
     steps:
       - name: Checkout
@@ -29,11 +29,14 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
           yes | sdkmanager --licenses
 
-      - name: Setup Flutter
+      - name: Setup Flutter (latest stable — includes Dart >= 3.9)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
+          channel: 'stable'     # ← do NOT pin 3.24; this pulls the latest
+          cache: true
+
+      - name: Show Flutter/Dart versions
+        run: flutter --version
 
       - name: Flutter pub get
         run: flutter pub get
@@ -41,7 +44,7 @@ jobs:
       - name: Build debug APK
         run: flutter build apk --debug
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug.apk
