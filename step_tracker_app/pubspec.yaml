@@ -32,7 +32,6 @@ dependencies:
     sdk: flutter
   pedometer: ^4.0.1           # step counter (TYPE_STEP_COUNTER / StepDetector)
   geolocator: ^10.1.0         # GPS distance + altitude fallback
-  flutter_sensors: ^1.0.1     # barometer (pressure) for elevation change
   permission_handler: ^11.3.1
 
   # The following adds the Cupertino Icons font to your application.

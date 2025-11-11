@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:pedometer/pedometer.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:flutter_sensors/flutter_sensors.dart';
 
 void main() {
   runApp(const StepTrackerApp());
@@ -40,10 +39,7 @@ class _TrackerScreenState extends State<TrackerScreen> {
   Position? _lastPos;
   double _distanceMeters = 0.0;
 
-  // --- Elevation (barometer preferred, GPS fallback)
-  StreamSubscription<SensorEvent>? _pressSub;
-  bool _barometerAvailable = false;
-  double? _basePressure; // hPa
+  // --- Elevation (GPS-based)
   double? _lastAltitude; // meters
   double _elevationGain = 0.0; // uphill-only meters
 
@@ -65,14 +61,13 @@ class _TrackerScreenState extends State<TrackerScreen> {
     if (results[Permission.locationWhenInUse]?.isGranted != true) {
       throw 'Location permission denied';
     }
-    // activityRecognition may not exist on older APIs; ignore if permanently denied.
   }
 
   Future<void> _start() async {
     try {
       await _requestPermissions();
 
-      // Steps
+      // --- Steps
       _stepSub = Pedometer.stepCountStream.listen((StepCount s) {
         final v = s.steps;
         _baseSteps ??= v;
@@ -81,14 +76,10 @@ class _TrackerScreenState extends State<TrackerScreen> {
         setState(() => _status = 'Step counter not available on this device.');
       });
 
-      // GPS distance stream (2m filter)
+      // --- GPS distance & altitude
       final hasService = await Geolocator.isLocationServiceEnabled();
       if (!hasService) {
         setState(() => _status = 'Please enable Location Services.');
-      }
-      final perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.deniedForever) {
-        setState(() => _status = 'Location permission permanently denied.');
       }
 
       _posSub = Geolocator.getPositionStream(
@@ -99,37 +90,17 @@ class _TrackerScreenState extends State<TrackerScreen> {
       ).listen((p) {
         if (_lastPos != null) {
           final d = Geolocator.distanceBetween(
-            _lastPos!.latitude, _lastPos!.longitude, p.latitude, p.longitude);
+              _lastPos!.latitude, _lastPos!.longitude, p.latitude, p.longitude);
           _distanceMeters += d;
-
-          // GPS altitude fallback when no barometer
-          if (!_barometerAvailable) {
-            _updateAltitudeFromGPS(p.altitude);
-          }
+          _updateAltitude(p.altitude);
         }
         _lastPos = p;
         setState(() {});
       });
 
-      // Barometer
-      _barometerAvailable = await SensorManager()
-          .isSensorAvailable(Sensors.PRESSURE);
-      if (_barometerAvailable) {
-        final stream = await SensorManager().sensorUpdates(
-          sensorId: Sensors.PRESSURE,
-          interval: Sensors.SENSOR_DELAY_NORMAL,
-        );
-        _pressSub = stream.listen((event) {
-          final pressureHpa = event.data[0]; // hPa
-          _updateAltitudeFromPressure(pressureHpa);
-        });
-      }
-
       setState(() {
         _tracking = true;
-        _status = _barometerAvailable
-            ? 'Tracking (barometer + GPS)'
-            : 'Tracking (GPS; barometer not available)';
+        _status = 'Tracking (GPS only; barometer not available)';
       });
     } catch (e) {
       setState(() => _status = 'Error starting: $e');
@@ -137,46 +108,32 @@ class _TrackerScreenState extends State<TrackerScreen> {
   }
 
   void _stop() {
-    _stepSub?.cancel(); _stepSub = null;
-    _posSub?.cancel(); _posSub = null;
-    _pressSub?.cancel(); _pressSub = null;
+    _stepSub?.cancel();
+    _stepSub = null;
+    _posSub?.cancel();
+    _posSub = null;
     setState(() => _tracking = false);
   }
 
   void _reset() {
     _stop();
     setState(() {
-      _steps = 0; _baseSteps = null;
+      _steps = 0;
+      _baseSteps = null;
       _distanceMeters = 0.0;
       _lastPos = null;
-      _basePressure = null; _lastAltitude = null; _elevationGain = 0.0;
+      _lastAltitude = null;
+      _elevationGain = 0.0;
       _status = '';
     });
   }
 
-  // Hypsometric approximation: altitude in meters from pressure ratio.
-  // We use the first pressure as baseline (P0).
-  void _updateAltitudeFromPressure(double pressureHpa) {
-    _basePressure ??= pressureHpa; // baseline at start
-    final P = pressureHpa;
-    final P0 = _basePressure!;
-    final alt = 44330.0 * (1.0 - math.pow(P / P0, 1 / 5.255));
-    _updateElevationGain(alt);
-  }
-
-  void _updateAltitudeFromGPS(double altitudeMeters) {
-    _updateElevationGain(altitudeMeters);
-  }
-
-  void _updateElevationGain(double currentAlt) {
+  void _updateAltitude(double currentAlt) {
     if (_lastAltitude != null) {
       final delta = currentAlt - _lastAltitude!;
-      if (delta > 0) {
-        _elevationGain += delta;
-      }
+      if (delta > 0) _elevationGain += delta;
     }
     _lastAltitude = currentAlt;
-    setState(() {});
   }
 
   @override
@@ -192,23 +149,29 @@ class _TrackerScreenState extends State<TrackerScreen> {
             Card(
               child: ListTile(
                 title: const Text('Steps'),
-                trailing: Text('$_steps', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+                trailing: Text('$_steps',
+                    style: const TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.bold)),
               ),
             ),
             const SizedBox(height: 8),
             Card(
               child: ListTile(
                 title: const Text('Distance'),
-                subtitle: const Text('GPS-based (best accuracy)'),
-                trailing: Text('$km km', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+                subtitle: const Text('GPS-based'),
+                trailing: Text('$km km',
+                    style: const TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.bold)),
               ),
             ),
             const SizedBox(height: 8),
             Card(
               child: ListTile(
                 title: const Text('Elevation Gain'),
-                subtitle: Text(_barometerAvailable ? 'Barometer-based' : 'GPS altitude (fallback)'),
-                trailing: Text('$elev m', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+                subtitle: const Text('GPS altitude (approximate)'),
+                trailing: Text('$elev m',
+                    style: const TextStyle(
+                        fontSize: 24, fontWeight: FontWeight.bold)),
               ),
             ),
             const SizedBox(height: 16),
