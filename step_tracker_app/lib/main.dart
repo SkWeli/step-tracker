@@ -1,122 +1,248 @@
+import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:pedometer/pedometer.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_sensors/flutter_sensors.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const StepTrackerApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class StepTrackerApp extends StatelessWidget {
+  const StepTrackerApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'Step Tracker',
+      theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+      home: const TrackerScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
+class TrackerScreen extends StatefulWidget {
+  const TrackerScreen({super.key});
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<TrackerScreen> createState() => _TrackerScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _TrackerScreenState extends State<TrackerScreen> {
+  // --- Steps
+  StreamSubscription<StepCount>? _stepSub;
+  int _steps = 0;
+  int? _baseSteps;
 
-  void _incrementCounter() {
+  // --- Distance & GPS
+  StreamSubscription<Position>? _posSub;
+  Position? _lastPos;
+  double _distanceMeters = 0.0;
+
+  // --- Elevation (barometer preferred, GPS fallback)
+  StreamSubscription<SensorEvent>? _pressSub;
+  bool _barometerAvailable = false;
+  double? _basePressure; // hPa
+  double? _lastAltitude; // meters
+  double _elevationGain = 0.0; // uphill-only meters
+
+  bool _tracking = false;
+  String _status = '';
+
+  @override
+  void dispose() {
+    _stop();
+    super.dispose();
+  }
+
+  Future<void> _requestPermissions() async {
+    final results = await [
+      Permission.activityRecognition,
+      Permission.locationWhenInUse,
+    ].request();
+
+    if (results[Permission.locationWhenInUse]?.isGranted != true) {
+      throw 'Location permission denied';
+    }
+    // activityRecognition may not exist on older APIs; ignore if permanently denied.
+  }
+
+  Future<void> _start() async {
+    try {
+      await _requestPermissions();
+
+      // Steps
+      _stepSub = Pedometer.stepCountStream.listen((StepCount s) {
+        final v = s.steps;
+        _baseSteps ??= v;
+        setState(() => _steps = math.max(0, v - (_baseSteps ?? v)));
+      }, onError: (_) {
+        setState(() => _status = 'Step counter not available on this device.');
+      });
+
+      // GPS distance stream (2m filter)
+      final hasService = await Geolocator.isLocationServiceEnabled();
+      if (!hasService) {
+        setState(() => _status = 'Please enable Location Services.');
+      }
+      final perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.deniedForever) {
+        setState(() => _status = 'Location permission permanently denied.');
+      }
+
+      _posSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.best,
+          distanceFilter: 2,
+        ),
+      ).listen((p) {
+        if (_lastPos != null) {
+          final d = Geolocator.distanceBetween(
+            _lastPos!.latitude, _lastPos!.longitude, p.latitude, p.longitude);
+          _distanceMeters += d;
+
+          // GPS altitude fallback when no barometer
+          if (!_barometerAvailable) {
+            _updateAltitudeFromGPS(p.altitude);
+          }
+        }
+        _lastPos = p;
+        setState(() {});
+      });
+
+      // Barometer
+      _barometerAvailable = await SensorManager()
+          .isSensorAvailable(Sensors.PRESSURE);
+      if (_barometerAvailable) {
+        final stream = await SensorManager().sensorUpdates(
+          sensorId: Sensors.PRESSURE,
+          interval: Sensors.SENSOR_DELAY_NORMAL,
+        );
+        _pressSub = stream.listen((event) {
+          final pressureHpa = event.data[0]; // hPa
+          _updateAltitudeFromPressure(pressureHpa);
+        });
+      }
+
+      setState(() {
+        _tracking = true;
+        _status = _barometerAvailable
+            ? 'Tracking (barometer + GPS)'
+            : 'Tracking (GPS; barometer not available)';
+      });
+    } catch (e) {
+      setState(() => _status = 'Error starting: $e');
+    }
+  }
+
+  void _stop() {
+    _stepSub?.cancel(); _stepSub = null;
+    _posSub?.cancel(); _posSub = null;
+    _pressSub?.cancel(); _pressSub = null;
+    setState(() => _tracking = false);
+  }
+
+  void _reset() {
+    _stop();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _steps = 0; _baseSteps = null;
+      _distanceMeters = 0.0;
+      _lastPos = null;
+      _basePressure = null; _lastAltitude = null; _elevationGain = 0.0;
+      _status = '';
     });
+  }
+
+  // Hypsometric approximation: altitude in meters from pressure ratio.
+  // We use the first pressure as baseline (P0).
+  void _updateAltitudeFromPressure(double pressureHpa) {
+    _basePressure ??= pressureHpa; // baseline at start
+    final P = pressureHpa;
+    final P0 = _basePressure!;
+    final alt = 44330.0 * (1.0 - math.pow(P / P0, 1 / 5.255));
+    _updateElevationGain(alt);
+  }
+
+  void _updateAltitudeFromGPS(double altitudeMeters) {
+    _updateElevationGain(altitudeMeters);
+  }
+
+  void _updateElevationGain(double currentAlt) {
+    if (_lastAltitude != null) {
+      final delta = currentAlt - _lastAltitude!;
+      if (delta > 0) {
+        _elevationGain += delta;
+      }
+    }
+    _lastAltitude = currentAlt;
+    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final km = (_distanceMeters / 1000).toStringAsFixed(3);
+    final elev = _elevationGain.toStringAsFixed(1);
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      appBar: AppBar(title: const Text('Step Tracker')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+          children: [
+            Card(
+              child: ListTile(
+                title: const Text('Steps'),
+                trailing: Text('$_steps', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                title: const Text('Distance'),
+                subtitle: const Text('GPS-based (best accuracy)'),
+                trailing: Text('$km km', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: ListTile(
+                title: const Text('Elevation Gain'),
+                subtitle: Text(_barometerAvailable ? 'Barometer-based' : 'GPS altitude (fallback)'),
+                trailing: Text('$elev m', style: const TextStyle(fontSize: 24,fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            if (_status.isNotEmpty)
+              Text(_status, style: const TextStyle(color: Colors.grey)),
+            const Spacer(),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _tracking ? null : _start,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Start'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: _tracking ? _stop : null,
+                    icon: const Icon(Icons.stop),
+                    label: const Text('Stop'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _reset,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Reset'),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
