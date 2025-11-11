@@ -7,6 +7,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: step_tracker_app  # 👈 points to your Flutter project folder
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,12 +38,11 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      # Debug is easiest to share/install. Switch to --release later if you want.
       - name: Build debug APK
         run: flutter build apk --debug
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug.apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: step_tracker_app/build/app/outputs/flutter-apk/app-debug.apk
